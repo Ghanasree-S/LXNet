@@ -37,19 +37,35 @@ log = logging.getLogger(__name__)
 DEFAULT_MODELS = ["LXNet", "DenseNet201", "ResNet50V2", "InceptionV3"]
 
 
-def _callbacks(checkpoint: Path, patience: int = 8):
+def _callbacks(checkpoint: Path, patience: int = 8, paper_mode: bool = False):
+    """Training callbacks.
+
+    The paper trains at a single fixed learning rate for a fixed 40 epochs --
+    no adaptive decay or early stopping is described anywhere in its methods.
+    ``EarlyStopping``/``ReduceLROnPlateau`` are this repo's own addition for
+    the non-paper-mode arms; under ``paper_mode`` they are dropped so training
+    runs the full, constant-LR schedule the paper actually reports.
+    """
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
-    return [
-        tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss", patience=patience, restore_best_weights=True, verbose=1
-        ),
-        tf.keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss", factor=0.5, patience=max(2, patience // 3), min_lr=1e-6, verbose=1
-        ),
+    callbacks = [
         tf.keras.callbacks.ModelCheckpoint(
             str(checkpoint), monitor="val_loss", save_best_only=True, save_weights_only=True
         ),
     ]
+    if not paper_mode:
+        callbacks.insert(
+            0,
+            tf.keras.callbacks.EarlyStopping(
+                monitor="val_loss", patience=patience, restore_best_weights=True, verbose=1
+            ),
+        )
+        callbacks.insert(
+            1,
+            tf.keras.callbacks.ReduceLROnPlateau(
+                monitor="val_loss", factor=0.5, patience=max(2, patience // 3), min_lr=1e-6, verbose=1
+            ),
+        )
+    return callbacks
 
 
 def _index_of(samples, digest_to_row):
@@ -105,6 +121,7 @@ def train_once(
     batch_size: int = 32,
     tag: str = "holdout",
     weights: dict[int, float] | None = None,
+    paper_mode: bool = False,
 ) -> dict:
     """Train one model on one split and evaluate it on the test indices."""
     tf.keras.backend.clear_session()
@@ -120,7 +137,7 @@ def train_once(
         train_ds,
         validation_data=val_ds,
         epochs=epochs,
-        callbacks=_callbacks(checkpoint),
+        callbacks=_callbacks(checkpoint, paper_mode=paper_mode),
         class_weight=weights,
         verbose=2,
     )
@@ -188,6 +205,7 @@ def cross_validate(
     batch_size: int = 32,
     seed: int = 42,
     balance: bool = True,
+    paper_mode: bool = False,
 ) -> list[dict]:
     """Run k-fold CV over pre-computed fold index pairs.
 
@@ -201,6 +219,8 @@ def cross_validate(
         # scored: restore_best_weights picks the best of ~40 epochs, so scoring
         # on the monitor reports the maximum over 40 draws rather than the
         # model's accuracy. Carve the monitor out of the training rows instead.
+        # Under paper_mode there is no early stopping/LR schedule at all, but the
+        # split still needs a validation set for Keras's `validation_data`.
         inner_train, inner_val = _carve_validation(train_idx, labels, seed=seed + fold)
         if balance:
             # Carve first, then balance, so an oversampled copy cannot straddle
@@ -218,6 +238,7 @@ def cross_validate(
             epochs=epochs,
             batch_size=batch_size,
             tag=f"fold{fold}",
+            paper_mode=paper_mode,
         )
         metrics["fold"] = fold
         results.append(metrics)
@@ -382,6 +403,7 @@ def main(argv=None) -> int:
             batch_size=args.batch_size,
             tag="holdout",
             weights=None,
+            paper_mode=args.paper_mode,
         )
         summary["holdout"][name] = metrics
         _write(args.out_dir / f"history_{name}.json", history)
@@ -409,6 +431,7 @@ def main(argv=None) -> int:
                 batch_size=args.batch_size,
                 seed=args.seed,
                 balance=not args.paper_mode,
+                paper_mode=args.paper_mode,
             )
             summary["cross_validation"][name] = {
                 "folds": folds,
