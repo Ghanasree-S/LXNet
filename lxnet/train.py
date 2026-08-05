@@ -18,6 +18,8 @@ import tensorflow as tf
 from sklearn.model_selection import StratifiedKFold
 
 from .data import (
+    DedupeReport,
+    build_paper_balanced_dataset,
     dedupe,
     distribution,
     group_aware_folds,
@@ -54,17 +56,39 @@ def _index_of(samples, digest_to_row):
     return np.array([digest_to_row[s.digest] for s in samples], dtype=np.int64)
 
 
-def load_and_prepare(data_root: str | Path, cache_dir: Path, seed: int = 42):
-    """Index, deduplicate and cache the dataset. Returns samples plus the cache."""
+def load_and_prepare(
+    data_root: str | Path, cache_dir: Path, seed: int = 42, paper_mode: bool = False
+):
+    """Index, deduplicate and cache the dataset. Returns samples plus the cache.
+
+    ``paper_mode`` reproduces the paper's protocol exactly: no dedupe (its
+    protocol never removes near-duplicates), balancing to 1,000 images/class
+    (500 original + 500 augmented) *before* any split, and per-image CLAHE
+    grid search. This is the leaky pipeline the rest of the module exists to
+    avoid; it is opt-in only.
+    """
     samples = index_dataset(data_root)
     log.info("indexed %d images", len(samples))
 
-    samples, report = dedupe(samples)
-    log.info("dedupe: %s", report)
+    if paper_mode:
+        report = DedupeReport(exact_duplicates=0, cross_class_conflicts=0, kept=len(samples))
+        samples = build_paper_balanced_dataset(
+            samples, cache_dir=cache_dir / "paper_augmented", target_per_class=1000, seed=seed
+        )
+        log.info("paper-mode balancing: %s", distribution(samples))
+        images, labels = build_cache(
+            samples,
+            size=IMAGE_SIZE,
+            cache_path=cache_dir / "preprocessed.npz",
+            clahe_grid_search=True,
+        )
+    else:
+        samples, report = dedupe(samples)
+        log.info("dedupe: %s", report)
+        images, labels = build_cache(
+            samples, size=IMAGE_SIZE, cache_path=cache_dir / "preprocessed.npz"
+        )
 
-    images, labels = build_cache(
-        samples, size=IMAGE_SIZE, cache_path=cache_dir / "preprocessed.npz"
-    )
     digest_to_row = {s.digest: i for i, s in enumerate(samples)}
     return samples, images, labels, digest_to_row, report
 
@@ -252,7 +276,7 @@ def main(argv=None) -> int:
     parser.add_argument("--out-dir", default="runs/latest", type=Path)
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     parser.add_argument("--epochs", type=int, default=40)
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=48)
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--skip-cv", action="store_true", help="hold-out evaluation only")
@@ -273,7 +297,17 @@ def main(argv=None) -> int:
         help="models to cross-validate (default: all --models). "
         "The heavy backbones are usually hold-out only for time reasons.",
     )
+    parser.add_argument(
+        "--paper-mode",
+        action="store_true",
+        help="reproduce the paper's exact protocol: no dedupe, balance to "
+        "1000 images/class (500 original + 500 augmented) before an 80/10/10 "
+        "random split, per-image CLAHE grid search. Implies --split-mode random "
+        "and disables post-split oversampling (the data is already balanced).",
+    )
     args = parser.parse_args(argv)
+    if args.paper_mode:
+        args.split_mode = "random"
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"
@@ -295,7 +329,7 @@ def main(argv=None) -> int:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     samples, images, labels, digest_to_row, report = load_and_prepare(
-        args.data_root, args.out_dir, seed=args.seed
+        args.data_root, args.out_dir, seed=args.seed, paper_mode=args.paper_mode
     )
 
     if args.limit:
@@ -307,14 +341,20 @@ def main(argv=None) -> int:
     log.info("class distribution: %s", distribution(samples))
 
     split_fn = group_aware_split if args.split_mode == "grouped" else stratified_split
-    log.info("split mode: %s", args.split_mode)
-    parts = split_fn(samples, (0.70, 0.15, 0.15), seed=args.seed)
+    fractions = (0.80, 0.10, 0.10) if args.paper_mode else (0.70, 0.15, 0.15)
+    log.info("split mode: %s (paper_mode=%s)", args.split_mode, args.paper_mode)
+    parts = split_fn(samples, fractions, seed=args.seed)
     train_idx = _index_of(parts["train"], digest_to_row)
     val_idx = _index_of(parts["val"], digest_to_row)
     test_idx = _index_of(parts["test"], digest_to_row)
     log.info("split: %d train / %d val / %d test", len(train_idx), len(val_idx), len(test_idx))
 
-    balanced_train = _oversample_indices(train_idx, labels, seed=args.seed)
+    if args.paper_mode:
+        # Already balanced to 1000/class before the split -- oversampling again
+        # would duplicate rows on top of the paper's own balancing step.
+        balanced_train = train_idx
+    else:
+        balanced_train = _oversample_indices(train_idx, labels, seed=args.seed)
     log.info("training set balanced: %d -> %d rows", len(train_idx), len(balanced_train))
 
     summary: dict = {
@@ -368,6 +408,7 @@ def main(argv=None) -> int:
                 epochs=args.epochs,
                 batch_size=args.batch_size,
                 seed=args.seed,
+                balance=not args.paper_mode,
             )
             summary["cross_validation"][name] = {
                 "folds": folds,

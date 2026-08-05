@@ -16,7 +16,7 @@ import numpy as np
 import tensorflow as tf
 
 from .data import Sample
-from .preprocess import IMAGE_SIZE, apply_clahe
+from .preprocess import IMAGE_SIZE, apply_clahe, apply_clahe_grid_search
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ def build_cache(
     size: tuple[int, int] = IMAGE_SIZE,
     clahe: bool = True,
     cache_path: str | Path | None = None,
+    clahe_grid_search: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Decode, CLAHE and resize every sample once into a uint8 array.
 
@@ -54,7 +55,7 @@ def build_cache(
         if gray is None:
             raise ValueError(f"could not decode image: {sample.path}")
         if clahe:
-            gray = apply_clahe(gray)
+            gray = apply_clahe_grid_search(gray) if clahe_grid_search else apply_clahe(gray)
         images[i] = cv2.resize(gray, (size[1], size[0]), interpolation=cv2.INTER_AREA)
         labels[i] = sample.label
 

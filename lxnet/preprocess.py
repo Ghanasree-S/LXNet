@@ -40,6 +40,36 @@ def apply_clahe(
     return clahe.apply(image)
 
 
+# Paper Section "Contrast Enhancement using CLAHE": grid search over clip limit
+# and tile grid size, keeping whichever configuration yields the highest local
+# contrast (measured here as the standard deviation of pixel intensities).
+CLAHE_CLIP_GRID = (1.5, 2.0, 2.5, 3.0)
+CLAHE_TILE_GRID_OPTIONS = ((4, 4), (8, 8), (16, 16))
+
+
+def apply_clahe_grid_search(
+    image: np.ndarray,
+    clip_options: tuple[float, ...] = CLAHE_CLIP_GRID,
+    tile_options: tuple[tuple[int, int], ...] = CLAHE_TILE_GRID_OPTIONS,
+) -> np.ndarray:
+    """Per-image CLAHE parameter search, matching the paper's adaptive CLAHE.
+
+    Tries every (clip_limit, tile_grid) combination and keeps the result with
+    the highest pixel-intensity standard deviation, i.e. the most local
+    contrast without a fixed, dataset-wide setting.
+    """
+    best_image = image
+    best_score = -1.0
+    for clip_limit in clip_options:
+        for tile_grid in tile_options:
+            candidate = apply_clahe(image, clip_limit=clip_limit, tile_grid=tile_grid)
+            score = float(candidate.std())
+            if score > best_score:
+                best_score = score
+                best_image = candidate
+    return best_image
+
+
 def load_image(
     path: str | Path,
     size: tuple[int, int] = IMAGE_SIZE,

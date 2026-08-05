@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image
 from sklearn.model_selection import StratifiedGroupKFold
@@ -341,3 +342,70 @@ def distribution(samples: Iterable[Sample]) -> dict[str, int]:
     """Human-readable per-class counts, for logging and plots."""
     counts = Counter(s.display_name for s in samples)
     return dict(sorted(counts.items()))
+
+
+def _augment_image(gray: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """One augmented copy, matching the paper's augmentation spec exactly.
+
+    Rotation -5..+5 degrees, zoom 1.05x-1.15x, horizontal translation up to 5%
+    of image width, optional horizontal flip, bilinear interpolation. No
+    vertical flip (would invert anatomical orientation).
+    """
+    h, w = gray.shape
+    angle = rng.uniform(-5, 5)
+    scale = rng.uniform(1.05, 1.15)
+    tx = rng.uniform(-0.05, 0.05) * w
+    matrix = cv2.getRotationMatrix2D((w / 2, h / 2), angle, scale)
+    matrix[0, 2] += tx
+    out = cv2.warpAffine(gray, matrix, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    if rng.random() < 0.5:
+        out = np.ascontiguousarray(out[:, ::-1])
+    return out
+
+
+def build_paper_balanced_dataset(
+    samples: Sequence[Sample],
+    cache_dir: str | Path,
+    target_per_class: int = 1000,
+    seed: int = 42,
+) -> list[Sample]:
+    """Reproduce the paper's balancing exactly: 1,000 images/class, 500 original
+    + 500 augmented, selected and generated *before* any train/val/test split.
+
+    This is deliberately the leaky protocol the rest of this module exists to
+    avoid (see ``group_aware_split``) -- it exists only so the paper's reported
+    numbers can be reproduced on request. Augmented copies are written to
+    ``cache_dir`` as real files so they become ordinary ``Sample`` objects.
+    """
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(seed)
+
+    by_label: dict[int, list[Sample]] = defaultdict(list)
+    for s in samples:
+        by_label[s.label].append(s)
+
+    balanced: list[Sample] = []
+    for label in sorted(by_label):
+        pool = by_label[label]
+        class_name = pool[0].class_name
+        n_original = min(500, len(pool))
+        order = rng.permutation(len(pool))
+        original_samples = [pool[i] for i in order[:n_original]]
+        balanced.extend(original_samples)
+
+        n_augmented = target_per_class - n_original
+        class_dir = cache_dir / class_name
+        class_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(n_augmented):
+            source = pool[int(rng.integers(0, len(pool)))]
+            with Image.open(source.path) as im:
+                gray = np.asarray(im.convert("L"), dtype=np.uint8)
+            aug = _augment_image(gray, rng)
+            out_path = class_dir / f"aug_{label}_{i:04d}.png"
+            cv2.imwrite(str(out_path), aug)
+            digest = hashlib.sha256(out_path.read_bytes()).hexdigest()
+            balanced.append(Sample(path=out_path, label=label, class_name=class_name, digest=digest))
+
+    log.info("paper balancing: %d images/class x 9 classes = %d total", target_per_class, len(balanced))
+    return balanced
