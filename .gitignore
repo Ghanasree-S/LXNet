@@ -1,0 +1,59 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Logs / dumps
+*.log
+allout.txt
+nbdump.txt
+nbfull.txt
+deps.log
+tf_install.log
+numpyfix.log
+gpu_smoke.log
+
+# Large binary artifacts
+tensorflow-*.whl
+
+# Environment
+.env
+conda_env.yml
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Claude
+.claude/
+# Dataset + run outputs (never commit images or weights)
+data/
+runs/
+*.h5
+*.keras
+
+# Raw dataset
+dataset/
+*.zip
+dataset/
+runs/
+data/
+*.h5
+*.keras
+dataset.zip
+run_both.sh
+
+# Packaging
+*.egg-info/
+build/
+dist/
+.ruff_cache/
+.coverage
+htmlcov/

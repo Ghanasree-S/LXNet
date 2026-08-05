@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,xai]"
+
+      - name: Lint
+        run: ruff check lxnet tests
+
+      - name: Format check
+        run: ruff format --check lxnet tests
+
+      # The dataset is not in the repository, and the slow tests download ImageNet
+      # weights. Everything else runs on synthetic fixtures and must stay green.
+      - name: Test
+        run: pytest -m "not slow" --cov --cov-report=term-missing
+
+  guarantees:
+    # The evaluation-integrity tests are the reason this project exists. Run them
+    # as their own job so a failure is unmissable in the checks list rather than
+    # buried in a 100-line pytest summary.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: No train/test leakage, no monitor peeking, no label drift
+        run: pytest -m "not slow" tests/test_grouping.py tests/test_data.py tests/test_train_cli.py tests/test_predict.py
